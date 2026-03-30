@@ -453,6 +453,11 @@ class Project:
 # ----------------------------- map popup ----------------------------- #
 
 class MapOriginDialog(tk.Toplevel):
+    MAP_TILE_SERVERS = {
+        "Google normal": ("https://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}&s=Ga", 22),
+        "Google satellite": ("https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}&s=Ga", 22),
+    }
+
     def __init__(self, master, lat=None, lon=None):
         super().__init__(master)
         self.title("Map Origin Picker")
@@ -472,6 +477,10 @@ class MapOriginDialog(tk.Toplevel):
         self.lon_var = tk.StringVar(value="" if lon is None else str(lon))
         ttk.Entry(top, textvariable=self.lon_var, width=16).pack(side="left", padx=(4, 12))
 
+        ttk.Label(top, text="Map style").pack(side="left")
+        self.map_style_var = tk.StringVar(value="Google normal")
+        ttk.OptionMenu(top, self.map_style_var, "Google normal", *self.MAP_TILE_SERVERS.keys(), command=self.on_map_style_change).pack(side="left", padx=(4, 12))
+
         ttk.Button(top, text="Use typed coords", command=self.use_typed).pack(side="left")
         ttk.Button(top, text="Close", command=self.destroy).pack(side="right")
 
@@ -487,6 +496,7 @@ class MapOriginDialog(tk.Toplevel):
 
         self.map_widget = TkinterMapView(self, corner_radius=0)
         self.map_widget.pack(fill="both", expand=True)
+        self.on_map_style_change(self.map_style_var.get())
         try:
             self.map_widget.set_position(lat or 49.2827, lon or -123.1207)
             self.map_widget.set_zoom(18)
@@ -494,6 +504,15 @@ class MapOriginDialog(tk.Toplevel):
             pass
 
         self.map_widget.add_left_click_map_command(self.on_map_click)
+
+    def on_map_style_change(self, style):
+        if not self.map_widget:
+            return
+        cfg = self.MAP_TILE_SERVERS.get(style)
+        if not cfg:
+            return
+        url, max_zoom = cfg
+        self.map_widget.set_tile_server(url, max_zoom=max_zoom)
 
     def on_map_click(self, coords):
         lat, lon = coords

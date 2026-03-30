@@ -16,6 +16,7 @@ Tkinter desktop app for annotating windows on a floor plan image and computing d
 - Compute drone heading (degrees clockwise from north)
 - Save and load project JSON
 - Export CSV and verbose JSON
+- View drone points on map from project JSON (`project_map_viewer.py`)
 
 ## Coordinate Model
 
@@ -89,8 +90,39 @@ the app converts local ENU-like coordinates to LLA using `navpy`.
 ### Keyboard
 
 - `Esc`: cancel current temp operation and switch to `Select`
+- `Ctrl+S`: save project
 - `Ctrl+Z`: undo
 - `Ctrl+Y`: redo
+
+## Output Folders
+
+Current default outputs are organized as:
+
+- `output/project/json`: project saves and JSON exports
+- `output/project/csv`: CSV exports
+
+`exporter.py` also writes CSV output to `output/project/csv`.
+
+## Map Viewer Utility
+
+`project_map_viewer.py` loads project JSON and displays drone LLA + heading markers on a map.
+
+Map style dropdown options:
+
+- Google normal (default)
+- Google satellite
+
+Run:
+
+```bash
+python project_map_viewer.py
+```
+
+Or open directly with a file:
+
+```bash
+python project_map_viewer.py path/to/project.json
+```
 
 ## Requirements
 
@@ -106,14 +138,8 @@ Install:
 pip install pillow navpy tkintermapview
 ```
 
-## Run
+## Run Main App
 
 ```bash
 python app.py
 ```
-
-## Output Files
-
-- Project JSON: editable state
-- Export JSON: verbose structured output
-- Export CSV: flat row output
