@@ -18,6 +18,17 @@ DEFAULT_COLUMNS = [
     "heading_deg",
 ]
 
+OUTPUT_ROOT = Path(__file__).resolve().parent / "output"
+OUTPUT_PROJECT_DIR = OUTPUT_ROOT / "project"
+OUTPUT_JSON_DIR = OUTPUT_PROJECT_DIR / "json"
+OUTPUT_CSV_DIR = OUTPUT_PROJECT_DIR / "csv"
+
+
+def ensure_output_dirs() -> Tuple[Path, Path]:
+    OUTPUT_JSON_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_CSV_DIR.mkdir(parents=True, exist_ok=True)
+    return (OUTPUT_JSON_DIR, OUTPUT_CSV_DIR)
+
 
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
@@ -136,12 +147,15 @@ def convert_json_to_csv(json_path: Path, csv_path: Path, columns: Optional[List[
 
 
 def pick_paths_with_tk() -> Tuple[Optional[Path], Optional[Path]]:
+    json_dir, csv_dir = ensure_output_dirs()
+
     root = tk.Tk()
     root.withdraw()
     root.update()
 
     in_path = filedialog.askopenfilename(
         title="Select input JSON",
+        initialdir=str(json_dir),
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
     )
     if not in_path:
@@ -149,10 +163,11 @@ def pick_paths_with_tk() -> Tuple[Optional[Path], Optional[Path]]:
         return (None, None)
 
     json_path = Path(in_path).expanduser().resolve()
-    default_out = json_path.with_name(json_path.stem + "_lla_heading.csv")
+    default_out = csv_dir / f"{json_path.stem}_lla_heading.csv"
     out_path = filedialog.asksaveasfilename(
         title="Save output CSV as",
         defaultextension=".csv",
+        initialdir=str(csv_dir),
         initialfile=default_out.name,
         filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
     )
@@ -171,15 +186,23 @@ def main() -> None:
             print("No file selected. Cancelled.")
             sys.exit(0)
     else:
+        _, csv_dir = ensure_output_dirs()
         json_path = Path(sys.argv[1]).expanduser().resolve()
         if not json_path.exists():
             print(f"Input not found: {json_path}")
             sys.exit(2)
 
         if len(sys.argv) >= 3:
-            csv_path = Path(sys.argv[2]).expanduser().resolve()
+            # Keep output CSV in output/project/csv regardless of caller path.
+            csv_path = csv_dir / Path(sys.argv[2]).name
         else:
-            csv_path = json_path.with_name(json_path.stem + "_lla_heading.csv")
+            csv_path = csv_dir / f"{json_path.stem}_lla_heading.csv"
+
+    # Keep output CSV in output/project/csv for both GUI and CLI flows.
+    _, csv_dir = ensure_output_dirs()
+    csv_path = csv_dir / csv_path.name
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         convert_json_to_csv(json_path, csv_path)

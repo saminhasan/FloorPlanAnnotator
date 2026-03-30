@@ -535,6 +535,12 @@ class AnnotatorApp(tk.Tk):
         self.geometry("1500x900")
         self.minsize(1100, 700)
 
+        self.output_root = Path(__file__).resolve().parent / "output"
+        self.project_output_dir = self.output_root / "project"
+        self.project_json_output_dir = self.project_output_dir / "json"
+        self.project_csv_output_dir = self.project_output_dir / "csv"
+        self._ensure_output_dirs()
+
         self.project = Project()
         self.project_path: Optional[str] = None
 
@@ -564,6 +570,27 @@ class AnnotatorApp(tk.Tk):
         self._build_ui()
         self._bind_canvas()
         self.refresh_all()
+
+    def _ensure_output_dirs(self) -> None:
+        self.project_json_output_dir.mkdir(parents=True, exist_ok=True)
+        self.project_csv_output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _project_save_path(self) -> str:
+        return str(self.project_json_output_dir / self._default_project_filename())
+
+    def _default_project_filename(self) -> str:
+        if self.project_path:
+            return Path(self.project_path).name
+        if self.project.image_path:
+            return f"{Path(self.project.image_path).stem}_project.json"
+        return "project.json"
+
+    def _default_export_stem(self) -> str:
+        if self.project_path:
+            return Path(self.project_path).stem
+        if self.project.image_path:
+            return Path(self.project.image_path).stem
+        return "export"
 
     # ---------- UI ---------- #
 
@@ -855,6 +882,7 @@ class AnnotatorApp(tk.Tk):
     def open_project_dialog(self):
         path = filedialog.askopenfilename(
             title="Open project JSON",
+            initialdir=str(self.project_json_output_dir),
             filetypes=[("JSON", "*.json"), ("All files", "*.*")]
         )
         if not path:
@@ -872,15 +900,17 @@ class AnnotatorApp(tk.Tk):
 
     def save_project(self):
         if not self.project_path:
-            self.save_project_as()
-            return
+            self.project_path = self._project_save_path()
         self.apply_settings_from_ui()
         try:
             project_obj = self.project.to_json_obj()
             project_obj["annotations"] = [ann.to_annotation_json_row(self.project) for ann in self.project.annotations]
+            # Keep all project saves in output/project/json regardless of where a project was opened from.
+            self.project_path = str(self.project_json_output_dir / Path(self.project_path).name)
+            Path(self.project_path).parent.mkdir(parents=True, exist_ok=True)
             with open(self.project_path, "w", encoding="utf-8") as f:
                 json.dump(project_obj, f, indent=2)
-            self.status("Project saved.")
+            self.status(f"Project saved: {self.project_path}")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
 
@@ -889,11 +919,14 @@ class AnnotatorApp(tk.Tk):
         path = filedialog.asksaveasfilename(
             title="Save project",
             defaultextension=".json",
+            initialdir=str(self.project_json_output_dir),
+            initialfile=self._default_project_filename(),
             filetypes=[("JSON", "*.json"), ("All files", "*.*")]
         )
         if not path:
             return
-        self.project_path = path
+        # Save As still chooses file name, but path is normalized to output/project/json.
+        self.project_path = str(self.project_json_output_dir / Path(path).name)
         self.save_project()
 
     def export_json(self):
@@ -906,6 +939,8 @@ class AnnotatorApp(tk.Tk):
         path = filedialog.asksaveasfilename(
             title="Export verbose JSON",
             defaultextension=".json",
+            initialdir=str(self.project_json_output_dir),
+            initialfile=f"{self._default_export_stem()}_export.json",
             filetypes=[("JSON", "*.json"), ("All files", "*.*")]
         )
         if not path:
@@ -920,9 +955,10 @@ class AnnotatorApp(tk.Tk):
             "exports": [ann.to_export_row(self.project) for ann in self.project.annotations],
         }
         try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(export_obj, f, indent=2)
-            self.status("JSON exported.")
+            self.status(f"JSON exported: {path}")
         except Exception as e:
             messagebox.showerror("Export failed", str(e))
 
@@ -936,6 +972,8 @@ class AnnotatorApp(tk.Tk):
         path = filedialog.asksaveasfilename(
             title="Export CSV",
             defaultextension=".csv",
+            initialdir=str(self.project_csv_output_dir),
+            initialfile=f"{self._default_export_stem()}_export.csv",
             filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
         )
         if not path:
@@ -947,11 +985,12 @@ class AnnotatorApp(tk.Tk):
             return
 
         try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf-8", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
                 writer.writeheader()
                 writer.writerows(rows)
-            self.status("CSV exported.")
+            self.status(f"CSV exported: {path}")
         except Exception as e:
             messagebox.showerror("Export failed", str(e))
 
@@ -1037,6 +1076,14 @@ class AnnotatorApp(tk.Tk):
     # ---------- canvas events ---------- #
 
     def _bind_canvas(self):
+        self.bind_all("<Escape>", self.on_escape)
+        self.bind_all("<Control-z>", self.on_undo_shortcut)
+        self.bind_all("<Control-y>", self.on_redo_shortcut)
+        self.bind_all("<Control-s>", self.on_save_shortcut)
+        self.bind_all("<Control-Z>", self.on_undo_shortcut)
+        self.bind_all("<Control-Y>", self.on_redo_shortcut)
+        self.bind_all("<Control-S>", self.on_save_shortcut)
+
         self.canvas.bind("<Configure>", lambda e: self.refresh_canvas())
         self.canvas.bind("<Button-1>", self.on_left_click)
         self.canvas.bind("<ButtonPress-2>", self.on_middle_down)
@@ -1049,6 +1096,22 @@ class AnnotatorApp(tk.Tk):
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
         self.canvas.bind("<Button-4>", lambda e: self.zoom_at((e.x, e.y), 1.1))
         self.canvas.bind("<Button-5>", lambda e: self.zoom_at((e.x, e.y), 1/1.1))
+
+    def on_escape(self, _e=None):
+        self.set_tool(self.TOOL_SELECT)
+        return "break"
+
+    def on_undo_shortcut(self, _e=None):
+        self.undo()
+        return "break"
+
+    def on_redo_shortcut(self, _e=None):
+        self.redo()
+        return "break"
+
+    def on_save_shortcut(self, _e=None):
+        self.save_project()
+        return "break"
 
     def on_middle_down(self, e):
         self.dragging_pan = True

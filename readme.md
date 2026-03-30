@@ -1,17 +1,17 @@
 # Drone Floor Plan Annotator
 
-A Tkinter desktop tool for annotating floor plan images and generating drone observation points for windows.
+Tkinter desktop app for annotating windows on a floor plan image and computing drone observation points, heading, and georeferenced outputs.
 
 ## Features
 
 - Load floor plan images (`png`, `jpg`, `jpeg`, `bmp`, `tif`, `tiff`, `webp`)
-- Pan and zoom the canvas
-- Set a local image origin
-- Calibrate X and Y scale using known dimensions
-- Annotate windows with:
+- Pan and zoom canvas
+- Set image origin
+- Calibrate X and Y scale with known real-world lengths
+- Add window annotations with 3 clicks:
   1. endpoint 1
   2. endpoint 2
-  3. side selection click
+  3. side selector click
 - Auto-compute drone standoff from window width, HFOV, and fill ratio
 - Compute drone heading (degrees clockwise from north)
 - Save and load project JSON
@@ -21,27 +21,17 @@ A Tkinter desktop tool for annotating floor plan images and generating drone obs
 
 After origin is set:
 
-- Image `x` increases to the right
-- Image `y` increases downward
-- Local `east` increases to the right
-- Local `north` increases upward
+- image `x` increases to the right
+- image `y` increases downward
+- local `east` increases to the right
+- local `north` increases upward
 
 Image to local conversion:
 
 - `east_m = (px_x - origin_x) * meters_per_pixel`
 - `north_m = -(px_y - origin_y) * meters_per_pixel`
 
-## Window Annotation Logic
-
-For each window:
-
-1. Click first endpoint `p1`
-2. Click second endpoint `p2`
-3. Click a point on the desired side of the window
-
-The third click is only used to choose side. The stored drone point is computed automatically on the midpoint-perpendicular line.
-
-## Standoff Formula
+## Window Standoff Formula
 
 ```text
 d_m = W_m / (2 * tan(HFOV / 2) * fill_ratio)
@@ -49,45 +39,46 @@ d_m = W_m / (2 * tan(HFOV / 2) * fill_ratio)
 
 Where:
 
-- `W_m` is measured window width in meters
-- `HFOV` is camera horizontal field of view in degrees
-- `fill_ratio` is desired image-width occupancy by the window
+- `W_m` is window width in meters
+- `HFOV` is horizontal field of view in degrees
+- `fill_ratio` is desired frame fill ratio
 
 ## Georeferencing
 
-Optional georeferencing uses:
+When georef inputs are provided:
 
-- Origin latitude
-- Origin longitude
-- Origin altitude
-- Plan `+Y` azimuth clockwise from true north
+- origin latitude/longitude/altitude
+- plan `+Y` azimuth clockwise from true north
 
-If georeference values are set, exports include LLA outputs for drone (and midpoint in export rows).
+the app converts local ENU-like coordinates to LLA using `navpy`.
 
 ## Save vs Export
 
 ### Save Project
 
-- Saves full editable session state
-- Can be done while incomplete
-- Includes project structure and annotations
+- Saves editable working state
+- Saves annotations
+- Includes computed `drone_lat_deg`, `drone_lon_deg`, `drone_alt_m` inside annotations when georef is set
 
-### Export JSON / CSV
+### Export JSON
 
-- Produces final computed outputs
-- Requires valid calibration/settings
-- Includes derived fields for downstream use
+- Contains `project` plus flat `exports` rows
+- `project.annotations` also includes computed drone LLA fields
+
+### Export CSV
+
+- Flat per-annotation rows for scripting/spreadsheets
 
 ## Controls
 
 ### Tools
 
 - `Select`: select annotation
-- `Pan`: pan mode for left-click behavior
-- `Origin`: place local origin
-- `Cal X`: set X calibration line
-- `Cal Y`: set Y calibration line
-- `Window`: add window annotation
+- `Pan`: pan-mode left-click behavior
+- `Origin`: place origin
+- `Cal X`: set X calibration
+- `Cal Y`: set Y calibration
+- `Window`: add window
 
 ### Mouse
 
@@ -95,20 +86,21 @@ If georeference values are set, exports include LLA outputs for drone (and midpo
 - Middle drag or right drag: pan
 - Left click: active tool action
 
-## Installation
+### Keyboard
 
-### Requirements
+- `Esc`: cancel current temp operation and switch to `Select`
+- `Ctrl+Z`: undo
+- `Ctrl+Y`: redo
+
+## Requirements
 
 - Python 3.10+
 - Tkinter
 - Pillow
 - navpy
+- tkintermapview
 
-Optional:
-
-- `tkintermapview` for map-based origin picking
-
-Install dependencies:
+Install:
 
 ```bash
 pip install pillow navpy tkintermapview
@@ -122,10 +114,6 @@ python app.py
 
 ## Output Files
 
-- Project JSON: editable project state
-- Export JSON: verbose computed output
-- Export CSV: flat row output for spreadsheets/scripts
-
-## Notes
-
-Current implementation is intentionally lightweight and focused on annotation/export workflow.
+- Project JSON: editable state
+- Export JSON: verbose structured output
+- Export CSV: flat row output
