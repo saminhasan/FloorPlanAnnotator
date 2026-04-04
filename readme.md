@@ -1,38 +1,44 @@
 # Drone Floor Plan Annotator
 
-Tkinter desktop app for annotating windows on a floor plan image and computing drone observation points, heading, and georeferenced outputs.
+Desktop Tkinter app to annotate windows on a floor-plan image and compute drone capture points, heading, and optional georeferenced outputs.
 
 ## Features
 
-- Load floor plan images (`png`, `jpg`, `jpeg`, `bmp`, `tif`, `tiff`, `webp`)
-- Pan and zoom canvas
-- Set image origin
-- Calibrate X and Y scale with known real-world lengths
+- Load floor-plan images (`png`, `jpg`, `jpeg`, `bmp`, `tif`, `tiff`, `webp`)
+- Set plan origin
+- Calibrate X and Y scale from known real distances
 - Add window annotations with 3 clicks:
-  1. endpoint 1
-  2. endpoint 2
-  3. side selector click
-- Auto-compute drone standoff from window width, HFOV, and fill ratio
-- Compute drone heading (degrees clockwise from north)
-- Save and load project JSON
+  1. window endpoint 1
+  2. window endpoint 2
+  3. side selector click (which side the drone should stand off)
+- Two drone distance modes:
+  - `auto`: computed from HFOV + fill ratio
+  - `manual`: fixed user-entered distance (`Manual dist m`)
+- Real-time update of existing annotations when you click `Apply Settings`
+- Save/load project JSON
 - Export CSV and verbose JSON
+- Export marked plan image with drone positions overlaid
 - View drone points on map from project JSON (`project_map_viewer.py`)
 
 ## Coordinate Model
 
 After origin is set:
 
-- image `x` increases to the right
-- image `y` increases downward
-- local `east` increases to the right
-- local `north` increases upward
+- image `x`: positive to the right
+- image `y`: positive downward
+- local `east`: positive to the right
+- local `north`: positive upward
 
-Image to local conversion:
+Conversion:
 
 - `east_m = (px_x - origin_x) * meters_per_pixel`
 - `north_m = -(px_y - origin_y) * meters_per_pixel`
 
-## Window Standoff Formula
+## Drone Distance (Standoff)
+
+### Auto Mode
+
+Formula:
 
 ```text
 d_m = W_m / (2 * tan(HFOV / 2) * fill_ratio)
@@ -42,44 +48,67 @@ Where:
 
 - `W_m` is window width in meters
 - `HFOV` is horizontal field of view in degrees
-- `fill_ratio` is desired frame fill ratio
+- `fill_ratio` is desired frame occupancy ratio (0 < ratio <= 1)
+
+### Manual Mode
+
+- Set `Dist mode` to `manual`
+- Enter `Manual dist m`
+- Click `Apply Settings`
+- Manual distance overrides auto formula (HFOV/fill are ignored for standoff)
+
+## Real-Time Settings Apply
+
+When you click `Apply Settings`, the app recalculates existing annotations immediately (no reload needed) using the current settings and distance mode.
+
+## Annotation IDs and Labels
+
+- New annotations are sequentially numbered (`W1`, `W2`, ...)
+- Preview rendering does not consume IDs
+- IDs are re-numbered sequentially when loading a project and after deletions
 
 ## Georeferencing
 
-When georef inputs are provided:
+If georef fields are set:
 
 - origin latitude/longitude/altitude
 - plan `+Y` azimuth clockwise from true north
 
-the app converts local ENU-like coordinates to LLA using `navpy`.
+the app converts local EN coordinates to LLA using `navpy`.
 
 ## Save vs Export
 
 ### Save Project
 
-- Saves editable working state
-- Saves annotations
-- Includes computed `drone_lat_deg`, `drone_lon_deg`, `drone_alt_m` inside annotations when georef is set
+- Saves editable project state
+- Saved under `output/project/json`
+- Includes annotation geometry and current settings
 
 ### Export JSON
 
-- Contains `project` plus flat `exports` rows
-- `project.annotations` also includes computed drone LLA fields
+- Verbose structure with:
+  - `project` (full project payload)
+  - `exports` (flat per-annotation rows)
 
 ### Export CSV
 
-- Flat per-annotation rows for scripting/spreadsheets
+- Flat per-annotation table for spreadsheets/scripting
+
+### Export Marked Plan Image
+
+- Exports plan image with drone positions, guide lines, and labels drawn
+- Menu: `File -> Export Marked Plan Image...`
 
 ## Controls
 
 ### Tools
 
 - `Select`: select annotation
-- `Pan`: pan-mode left-click behavior
-- `Origin`: place origin
+- `Pan`: tool mode (mouse pan is still middle/right drag)
+- `Origin`: set origin point
 - `Cal X`: set X calibration
 - `Cal Y`: set Y calibration
-- `Window`: add window
+- `Window`: add window annotation
 
 ### Mouse
 
@@ -89,28 +118,24 @@ the app converts local ENU-like coordinates to LLA using `navpy`.
 
 ### Keyboard
 
-- `Esc`: cancel current temp operation and switch to `Select`
+- `Esc`: switch to `Select` and clear temp tool state
 - `Ctrl+S`: save project
 - `Ctrl+Z`: undo
 - `Ctrl+Y`: redo
 
 ## Output Folders
 
-Current default outputs are organized as:
-
-- `output/project/json`: project saves and JSON exports
+- `output/project/json`: project saves + JSON exports
 - `output/project/csv`: CSV exports
+- `output/project/images`: marked plan image exports
 
-`exporter.py` also writes CSV output to `output/project/csv`.
+`exporter.py` also writes output CSV into `output/project/csv`.
 
-## Map Viewer Utility
+## Utility Scripts
 
-`project_map_viewer.py` loads project JSON and displays drone LLA + heading markers on a map.
+### Project Map Viewer
 
-Map style dropdown options:
-
-- Google normal (default)
-- Google satellite
+`project_map_viewer.py` loads project JSON and plots drone points on a map.
 
 Run:
 
@@ -118,24 +143,44 @@ Run:
 python project_map_viewer.py
 ```
 
-Or open directly with a file:
+Or with file:
 
 ```bash
 python project_map_viewer.py path/to/project.json
+```
+
+### JSON to compact CSV exporter
+
+`exporter.py` converts saved/exported JSON to a compact CSV with:
+
+- `id`
+- `drone_lat_deg`
+- `drone_lon_deg`
+- `drone_alt_m`
+- `heading_deg`
+
+Run:
+
+```bash
+python exporter.py
+```
+
+Or:
+
+```bash
+python exporter.py path/to/input.json output_name.csv
 ```
 
 ## Requirements
 
 - Python 3.10+
 - Tkinter
-- Pillow
-- navpy
-- tkintermapview
+- Dependencies in `requirements.txt`
 
 Install:
 
 ```bash
-pip install pillow navpy tkintermapview
+pip install -r requirements.txt
 ```
 
 ## Run Main App

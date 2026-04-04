@@ -15,7 +15,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Tuple, Dict, Any, Sequence, TypeAlias
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 from tkintermapview import TkinterMapView
 import navpy
 import tkintermapview
@@ -234,6 +234,8 @@ class Project:
 
     camera_hfov_deg: float = 90.0
     frame_fill_ratio: float = 0.70
+    standoff_mode: str = "auto"  # "auto" uses HFOV/fill, "manual" uses manual_standoff_m
+    manual_standoff_m: float = 3.0
     global_height_m: float = 3.0
 
     georef_lat_deg: Optional[float] = None
@@ -287,23 +289,48 @@ class Project:
             errs.append("Y calibration incomplete.")
         if self.global_height_m is None:
             errs.append("Global height not set.")
-        if self.frame_fill_ratio <= 0 or self.frame_fill_ratio > 1:
-            errs.append("Frame fill ratio must be > 0 and <= 1.")
-        if self.camera_hfov_deg <= 0 or self.camera_hfov_deg >= 180:
-            errs.append("HFOV must be between 0 and 180.")
+        if self.uses_manual_standoff():
+            if self.manual_standoff_m <= 0:
+                errs.append("Manual distance must be > 0.")
+        else:
+            if self.frame_fill_ratio <= 0 or self.frame_fill_ratio > 1:
+                errs.append("Frame fill ratio must be > 0 and <= 1.")
+            if self.camera_hfov_deg <= 0 or self.camera_hfov_deg >= 180:
+                errs.append("HFOV must be between 0 and 180.")
         if not self.annotations:
             errs.append("No window annotations.")
         return (len(errs) == 0, errs)
 
-    def compute_window_annotation(self, p1: Vec2, p2: Vec2, side_click: Vec2, label: str = "") -> WindowAnnotation:
+    def uses_manual_standoff(self) -> bool:
+        return str(self.standoff_mode).strip().lower() == "manual"
+
+    def standoff_m_for_window_width(self, width_m: float) -> float:
+        if self.uses_manual_standoff():
+            if self.manual_standoff_m <= 0:
+                raise ValueError("Manual distance must be > 0.")
+            return float(self.manual_standoff_m)
+
+        if self.frame_fill_ratio <= 0 or self.frame_fill_ratio > 1:
+            raise ValueError("Fill ratio must be > 0 and <= 1.")
+        if self.camera_hfov_deg <= 0 or self.camera_hfov_deg >= 180:
+            raise ValueError("HFOV must be in (0, 180).")
+        half_angle = math.radians(self.camera_hfov_deg * 0.5)
+        denom = 2.0 * math.tan(half_angle) * self.frame_fill_ratio
+        if abs(denom) <= 1e-12:
+            raise ValueError("Invalid HFOV/fill combination.")
+        return width_m / denom
+
+    def compute_window_annotation(
+        self,
+        p1: Vec2,
+        p2: Vec2,
+        side_click: Vec2,
+        label: str = "",
+        consume_id: bool = True,
+    ) -> WindowAnnotation:
         m_per_px = self.avg_m_per_px()
         if m_per_px is None:
             raise ValueError("Scale is not calibrated.")
-
-        if self.frame_fill_ratio <= 0:
-            raise ValueError("Fill ratio must be > 0.")
-        if self.camera_hfov_deg <= 0 or self.camera_hfov_deg >= 180:
-            raise ValueError("HFOV must be in (0, 180).")
 
         win_vec = v_sub(p2, p1)
         width_px = v_len(win_vec)
@@ -311,8 +338,7 @@ class Project:
             raise ValueError("Window line length is zero.")
 
         width_m = width_px * m_per_px
-        half_angle = math.radians(self.camera_hfov_deg * 0.5)
-        standoff_m = width_m / (2.0 * math.tan(half_angle) * self.frame_fill_ratio)
+        standoff_m = self.standoff_m_for_window_width(width_m)
         standoff_px = standoff_m / m_per_px
 
         u = v_norm(win_vec)
@@ -333,9 +359,10 @@ class Project:
         drone_local = local_from_pixel(drone_px, self.origin_px.tup(), m_per_px)
         heading = heading_cw_from_north(drone_local, mid_local)
 
+        ann_id = self.next_ann_id
         ann = WindowAnnotation(
-            ann_id=self.next_ann_id,
-            label=label or f"W{self.next_ann_id}",
+            ann_id=ann_id,
+            label=label or f"W{ann_id}",
             p1_px=Point2.from_tuple(p1),
             p2_px=Point2.from_tuple(p2),
             side_sign=side_sign,
@@ -348,8 +375,58 @@ class Project:
             drone_local_m=Point2.from_tuple(drone_local),
             heading_deg=heading,
         )
-        self.next_ann_id += 1
+        if consume_id:
+            self.next_ann_id += 1
         return ann
+
+    def recompute_existing_annotations(self) -> Tuple[int, int]:
+        if not self.annotations:
+            return (0, 0)
+
+        m_per_px = self.avg_m_per_px()
+        if m_per_px is None or self.origin_px is None:
+            return (0, 0)
+        updated = 0
+        skipped = 0
+        for ann in self.annotations:
+            try:
+                p1 = ann.p1_px.tup()
+                p2 = ann.p2_px.tup()
+                win_vec = v_sub(p2, p1)
+                width_px = v_len(win_vec)
+                if width_px <= 1e-9:
+                    raise ValueError("Window line length is zero.")
+
+                width_m = width_px * m_per_px
+                standoff_m = self.standoff_m_for_window_width(width_m)
+                standoff_px = standoff_m / m_per_px
+
+                u = v_norm(win_vec)
+                if v_len(u) <= 1e-12:
+                    raise ValueError("Window line vector is zero.")
+                n = (-u[1], u[0])
+                mid = v_mid(p1, p2)
+                side_sign = 1 if ann.side_sign >= 0 else -1
+                drone_px = v_add(mid, v_mul(n, side_sign * standoff_px))
+
+                mid_local = local_from_pixel(mid, self.origin_px.tup(), m_per_px)
+                drone_local = local_from_pixel(drone_px, self.origin_px.tup(), m_per_px)
+                heading = heading_cw_from_north(drone_local, mid_local)
+
+                ann.side_sign = side_sign
+                ann.midpoint_px = Point2.from_tuple(mid)
+                ann.window_width_px = width_px
+                ann.window_width_m = width_m
+                ann.standoff_m = standoff_m
+                ann.drone_px = Point2.from_tuple(drone_px)
+                ann.midpoint_local_m = Point2.from_tuple(mid_local)
+                ann.drone_local_m = Point2.from_tuple(drone_local)
+                ann.heading_deg = heading
+                updated += 1
+            except Exception:
+                skipped += 1
+
+        return (updated, skipped)
 
     def rotated_site_from_plan_local(self, east_m: float, north_m: float) -> Tuple[float, float]:
         """
@@ -422,6 +499,13 @@ class Project:
         proj.y_cal = cal(obj.get("y_cal", {}))
         proj.camera_hfov_deg = obj.get("camera_hfov_deg", 90.0)
         proj.frame_fill_ratio = obj.get("frame_fill_ratio", 0.70)
+        proj.standoff_mode = str(obj.get("standoff_mode", "auto")).strip().lower()
+        if proj.standoff_mode not in ("auto", "manual"):
+            proj.standoff_mode = "auto"
+        try:
+            proj.manual_standoff_m = float(obj.get("manual_standoff_m", 3.0))
+        except Exception:
+            proj.manual_standoff_m = 3.0
         proj.global_height_m = obj.get("global_height_m", 3.0)
         proj.georef_lat_deg = obj.get("georef_lat_deg")
         proj.georef_lon_deg = obj.get("georef_lon_deg")
@@ -558,6 +642,7 @@ class AnnotatorApp(tk.Tk):
         self.project_output_dir = self.output_root / "project"
         self.project_json_output_dir = self.project_output_dir / "json"
         self.project_csv_output_dir = self.project_output_dir / "csv"
+        self.project_image_output_dir = self.project_output_dir / "images"
         self._ensure_output_dirs()
 
         self.project = Project()
@@ -593,6 +678,7 @@ class AnnotatorApp(tk.Tk):
     def _ensure_output_dirs(self) -> None:
         self.project_json_output_dir.mkdir(parents=True, exist_ok=True)
         self.project_csv_output_dir.mkdir(parents=True, exist_ok=True)
+        self.project_image_output_dir.mkdir(parents=True, exist_ok=True)
 
     def _project_save_path(self) -> str:
         return str(self.project_json_output_dir / self._default_project_filename())
@@ -669,15 +755,30 @@ class AnnotatorApp(tk.Tk):
 
         self.hfov_var = tk.StringVar(value=str(self.project.camera_hfov_deg))
         self.fill_var = tk.StringVar(value=str(self.project.frame_fill_ratio))
+        self.standoff_mode_var = tk.StringVar(value=self.project.standoff_mode)
+        self.manual_standoff_var = tk.StringVar(value=str(self.project.manual_standoff_m))
         self.height_var = tk.StringVar(value=str(self.project.global_height_m))
         self.lat_var = tk.StringVar()
         self.lon_var = tk.StringVar()
         self.alt_var = tk.StringVar(value=str(self.project.georef_alt_m))
         self.az_var = tk.StringVar()
 
-        self._labeled_entry(sf, "HFOV deg", self.hfov_var)
-        self._labeled_entry(sf, "Fill ratio", self.fill_var)
-        self._labeled_entry(sf, "Height m", self.height_var)
+        self.hfov_entry = self._labeled_entry(sf, "HFOV deg", self.hfov_var)
+        self.fill_entry = self._labeled_entry(sf, "Fill ratio", self.fill_var)
+        mode_row = ttk.Frame(sf)
+        mode_row.pack(fill="x", padx=6, pady=2)
+        ttk.Label(mode_row, text="Dist mode", width=16).pack(side="left")
+        self.standoff_mode_menu = ttk.OptionMenu(
+            mode_row,
+            self.standoff_mode_var,
+            self.standoff_mode_var.get(),
+            "auto",
+            "manual",
+            command=self.on_standoff_mode_change,
+        )
+        self.standoff_mode_menu.pack(side="left", fill="x", expand=True)
+        self.manual_standoff_entry = self._labeled_entry(sf, "Manual dist m", self.manual_standoff_var)
+        self.height_entry = self._labeled_entry(sf, "Height m", self.height_var)
         ttk.Separator(sf).pack(fill="x", padx=6, pady=4)
         self._labeled_entry(sf, "Origin lat", self.lat_var)
         self._labeled_entry(sf, "Origin lon", self.lon_var)
@@ -685,6 +786,7 @@ class AnnotatorApp(tk.Tk):
         self._labeled_entry(sf, "Plan +Y azimuth", self.az_var)
 
         ttk.Button(sf, text="Apply Settings", command=self.apply_settings_from_ui).pack(fill="x", padx=6, pady=6)
+        self.update_standoff_mode_ui()
 
         vf = ttk.LabelFrame(left, text="Validation / Scale")
         vf.pack(fill="x", padx=4, pady=4)
@@ -713,6 +815,7 @@ class AnnotatorApp(tk.Tk):
         m_file.add_separator()
         m_file.add_command(label="Export CSV...", command=self.export_csv)
         m_file.add_command(label="Export JSON...", command=self.export_json)
+        m_file.add_command(label="Export Marked Plan Image...", command=self.export_marked_plan_image)
         m_file.add_separator()
         m_file.add_command(label="Exit", command=self.destroy)
         menubar.add_cascade(label="File", menu=m_file)
@@ -757,7 +860,21 @@ class AnnotatorApp(tk.Tk):
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=6, pady=2)
         ttk.Label(row, text=label, width=16).pack(side="left")
-        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        entry = ttk.Entry(row, textvariable=var)
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
+
+    def on_standoff_mode_change(self, _value=None):
+        self.update_standoff_mode_ui()
+
+    def update_standoff_mode_ui(self):
+        mode = self.standoff_mode_var.get().strip().lower()
+        manual = (mode == "manual")
+        auto_state = "disabled" if manual else "normal"
+        manual_state = "normal" if manual else "disabled"
+        self.hfov_entry.configure(state=auto_state)
+        self.fill_entry.configure(state=auto_state)
+        self.manual_standoff_entry.configure(state=manual_state)
 
     # ---------- canvas transforms ---------- #
 
@@ -825,26 +942,101 @@ class AnnotatorApp(tk.Tk):
             self.image_tk = None
         self.refresh_all()
 
+    def renumber_annotations(self) -> None:
+        for idx, ann in enumerate(self.project.annotations, start=1):
+            old_label = ann.label or ""
+            ann.ann_id = idx
+            if old_label.startswith("W") and old_label[1:].isdigit():
+                ann.label = f"W{idx}"
+        self.project.next_ann_id = len(self.project.annotations) + 1
+
     # ---------- model sync ---------- #
 
     def apply_settings_from_ui(self):
         try:
-            self.project.camera_hfov_deg = float(self.hfov_var.get().strip())
-            self.project.frame_fill_ratio = float(self.fill_var.get().strip())
-            self.project.global_height_m = float(self.height_var.get().strip())
+            new_mode = self.standoff_mode_var.get().strip().lower()
+            if new_mode not in ("auto", "manual"):
+                raise ValueError("Invalid distance mode.")
+
+            if new_mode == "auto":
+                new_hfov = float(self.hfov_var.get().strip())
+                new_fill = float(self.fill_var.get().strip())
+            else:
+                new_hfov = self.project.camera_hfov_deg
+                new_fill = self.project.frame_fill_ratio
+
+            if new_mode == "manual":
+                new_manual_standoff = float(self.manual_standoff_var.get().strip())
+                if new_manual_standoff <= 0:
+                    raise ValueError("Manual distance must be > 0.")
+            else:
+                cur_manual = self.manual_standoff_var.get().strip()
+                try:
+                    new_manual_standoff = float(cur_manual) if cur_manual else self.project.manual_standoff_m
+                except ValueError:
+                    new_manual_standoff = self.project.manual_standoff_m
+
+            new_height = float(self.height_var.get().strip())
 
             lat_s = self.lat_var.get().strip()
             lon_s = self.lon_var.get().strip()
             az_s = self.az_var.get().strip()
             alt_s = self.alt_var.get().strip()
 
-            self.project.georef_lat_deg = float(lat_s) if lat_s else None
-            self.project.georef_lon_deg = float(lon_s) if lon_s else None
-            self.project.georef_alt_m = float(alt_s) if alt_s else 0.0
-            self.project.plan_y_azimuth_deg_cw_from_north = float(az_s) if az_s else None
+            new_lat = float(lat_s) if lat_s else None
+            new_lon = float(lon_s) if lon_s else None
+            new_alt = float(alt_s) if alt_s else 0.0
+            new_az = float(az_s) if az_s else None
         except ValueError:
             messagebox.showerror("Invalid", "One or more settings are not valid numbers.")
             return
+
+        old_settings = (
+            self.project.camera_hfov_deg,
+            self.project.frame_fill_ratio,
+            self.project.global_height_m,
+            self.project.georef_lat_deg,
+            self.project.georef_lon_deg,
+            self.project.georef_alt_m,
+            self.project.plan_y_azimuth_deg_cw_from_north,
+            self.project.standoff_mode,
+            self.project.manual_standoff_m,
+        )
+        new_settings = (
+            new_hfov,
+            new_fill,
+            new_height,
+            new_lat,
+            new_lon,
+            new_alt,
+            new_az,
+            new_mode,
+            new_manual_standoff,
+        )
+        if old_settings != new_settings:
+            self.snapshot()
+
+        self.project.camera_hfov_deg = new_hfov
+        self.project.frame_fill_ratio = new_fill
+        self.project.standoff_mode = new_mode
+        self.project.manual_standoff_m = new_manual_standoff
+        self.project.global_height_m = new_height
+        self.project.georef_lat_deg = new_lat
+        self.project.georef_lon_deg = new_lon
+        self.project.georef_alt_m = new_alt
+        self.project.plan_y_azimuth_deg_cw_from_north = new_az
+        self.update_standoff_mode_ui()
+
+        updated, skipped = self.project.recompute_existing_annotations()
+        if updated > 0:
+            msg = f"Settings applied. Recomputed {updated} annotations."
+            if skipped:
+                msg += f" Skipped {skipped}."
+            self.status(msg)
+        elif self.project.annotations and (self.project.origin_px is None or not self.project.has_scale()):
+            self.status("Settings applied. Set origin and scale to recompute existing annotations.")
+        else:
+            self.status("Settings applied.")
 
         self.refresh_all()
 
@@ -852,11 +1044,14 @@ class AnnotatorApp(tk.Tk):
         self.image_path_var.set(self.project.image_path or "(no image)")
         self.hfov_var.set(str(self.project.camera_hfov_deg))
         self.fill_var.set(str(self.project.frame_fill_ratio))
+        self.standoff_mode_var.set(self.project.standoff_mode)
+        self.manual_standoff_var.set(str(self.project.manual_standoff_m))
         self.height_var.set(str(self.project.global_height_m))
         self.lat_var.set("" if self.project.georef_lat_deg is None else str(self.project.georef_lat_deg))
         self.lon_var.set("" if self.project.georef_lon_deg is None else str(self.project.georef_lon_deg))
         self.alt_var.set(str(self.project.georef_alt_m))
         self.az_var.set("" if self.project.plan_y_azimuth_deg_cw_from_north is None else str(self.project.plan_y_azimuth_deg_cw_from_north))
+        self.update_standoff_mode_ui()
 
     # ---------- file ops ---------- #
 
@@ -910,6 +1105,7 @@ class AnnotatorApp(tk.Tk):
             with open(path, "r", encoding="utf-8") as f:
                 obj = json.load(f)
             self.project = Project.from_json_obj(obj)
+            self.renumber_annotations()
             self.project_path = path
             self.undo_stack.clear()
             self.redo_stack.clear()
@@ -1013,6 +1209,61 @@ class AnnotatorApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Export failed", str(e))
 
+    def export_marked_plan_image(self):
+        if not self.project.image_path or not os.path.exists(self.project.image_path):
+            messagebox.showerror("Export blocked", "Load a valid floor plan image first.")
+            return
+        if not self.project.annotations:
+            messagebox.showerror("Export blocked", "Add at least one annotation first.")
+            return
+
+        default_name = f"{self._default_export_stem()}_drones_marked.png"
+        path = filedialog.asksaveasfilename(
+            title="Export marked plan image",
+            defaultextension=".png",
+            initialdir=str(self.project_image_output_dir),
+            initialfile=default_name,
+            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg *.jpeg"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            img = Image.open(self.project.image_path).convert("RGBA")
+            draw = ImageDraw.Draw(img)
+
+            iw, ih = img.size
+            point_r = max(4, int(round(min(iw, ih) * 0.008)))
+            line_w = max(2, int(round(point_r * 0.5)))
+
+            for ann in self.project.annotations:
+                mx, my = ann.midpoint_px.x, ann.midpoint_px.y
+                dx, dy = ann.drone_px.x, ann.drone_px.y
+                draw.line((mx, my, dx, dy), fill=(255, 0, 255, 210), width=line_w)
+                draw.ellipse(
+                    (dx - point_r, dy - point_r, dx + point_r, dy + point_r),
+                    fill=(255, 0, 255, 230),
+                    outline=(255, 255, 255, 255),
+                    width=max(1, point_r // 3),
+                )
+
+                label = ann.label or f"W{ann.ann_id}"
+                tx = dx + point_r + 4
+                ty = dy - point_r - 4
+                for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    draw.text((tx + ox, ty + oy), label, fill=(0, 0, 0, 255))
+                draw.text((tx, ty), label, fill=(255, 255, 255, 255))
+
+            out_path = Path(path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if out_path.suffix.lower() in {".jpg", ".jpeg"}:
+                img = img.convert("RGB")
+            img.save(out_path)
+            self.status(f"Marked plan image exported: {out_path}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+
     # ---------- validation ---------- #
 
     def validation_lines(self):
@@ -1037,8 +1288,14 @@ class AnnotatorApp(tk.Tk):
         if mismatch is not None:
             lines.append(f"Scale mismatch: {mismatch*100:.2f}%")
 
-        lines.append(f"HFOV: {self.project.camera_hfov_deg}")
-        lines.append(f"Fill ratio: {self.project.frame_fill_ratio}")
+        lines.append(f"Distance mode: {'manual' if self.project.uses_manual_standoff() else 'auto'}")
+        if self.project.uses_manual_standoff():
+            lines.append(f"Manual dist m: {self.project.manual_standoff_m}")
+            lines.append(f"HFOV (ignored): {self.project.camera_hfov_deg}")
+            lines.append(f"Fill ratio (ignored): {self.project.frame_fill_ratio}")
+        else:
+            lines.append(f"HFOV: {self.project.camera_hfov_deg}")
+            lines.append(f"Fill ratio: {self.project.frame_fill_ratio}")
         lines.append(f"Height m: {self.project.global_height_m}")
         lines.append(f"Georef: {'OK' if self.project.has_georef() else 'Local only'}")
         lines.append(f"Annotations: {len(self.project.annotations)}")
@@ -1070,6 +1327,7 @@ class AnnotatorApp(tk.Tk):
             return
         self.snapshot()
         self.project.annotations = [a for a in self.project.annotations if a.ann_id != self.selected_ann_id]
+        self.renumber_annotations()
         self.selected_ann_id = None
         self.refresh_all()
 
@@ -1411,7 +1669,13 @@ class AnnotatorApp(tk.Tk):
                     side_val = signed_side_of_perp_line(p1, p2, side_click)
                     if abs(side_val) >= side_deadband_px and self.project.origin_px and self.project.has_scale():
                         try:
-                            ann = self.project.compute_window_annotation(p1, p2, side_click, label="preview")
+                            ann = self.project.compute_window_annotation(
+                                p1,
+                                p2,
+                                side_click,
+                                label="preview",
+                                consume_id=False,
+                            )
                             self.temp_preview_ids.append(self._create_line(ann.midpoint_px.tup(), ann.drone_px.tup(), "#ff00ff", 2, dash=(6, 3)))
                             self.temp_preview_ids.append(self._create_circle(ann.drone_px.tup(), 5, "#ff00ff"))
                         except Exception:
@@ -1461,5 +1725,3 @@ class AnnotatorApp(tk.Tk):
 if __name__ == "__main__":
     app = AnnotatorApp()
     app.mainloop()
-
-
